@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { supabase } from '../../../lib/supabase';
+import { api } from '../../../lib/api';
 import { Loader2, ArrowLeft, BookOpen, GraduationCap, Building2, MonitorPlay } from 'lucide-react';
 
 const CourseList = () => {
@@ -28,18 +28,21 @@ const CourseList = () => {
     useEffect(() => {
         const fetchCourses = async () => {
             setLoading(true);
-            const { data, error } = await supabase
-                .from('quizzes') // We use the quizzes table as the course table
-                .select('*')
-                .eq('type', module || 'global') // Default to global if no module specified? Or fetch by type
-                .eq('status', 'active');
-
-            if (error) {
-                console.error('Error fetching courses:', error);
-            } else {
-                setCourses(data || []);
+            try {
+                // Fetch all quizzes from our secure, portable monolithic backend!
+                const data = await api.get('/quizzes');
+                
+                // Filter courses dynamically based on module type and status
+                const filtered = (data || []).filter((course: any) => 
+                    course.type === (module || 'global') && course.status === 'active'
+                );
+                
+                setCourses(filtered);
+            } catch (error) {
+                console.error('Error fetching courses from API:', error);
+            } finally {
+                setLoading(false);
             }
-            setLoading(false);
         };
 
         fetchCourses();

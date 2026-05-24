@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
+import { api } from '../../lib/api';
 import { ArrowLeft, Loader2, RotateCw, Lightbulb, ZoomIn } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { MathText } from '../../shared/components/MathText';
@@ -29,14 +30,13 @@ const FlashCards = () => {
         const fetchContent = async () => {
             if (!id) return;
             try {
-                // Fetch Quiz Details
-                const { data: quizData } = await supabase
-                    .from('quizzes')
-                    .select('title')
-                    .eq('id', id)
-                    .single();
-
-                if (quizData) setTitle(quizData.title);
+                // Fetch Quiz Details via Secure API
+                try {
+                    const quizData = await api.get(`/quizzes/${id}`);
+                    if (quizData) setTitle(quizData.title);
+                } catch (err) {
+                    console.error("Failed to fetch quiz details via secure API:", err);
+                }
 
                 // Fetch Questions
                 const { data, error } = await supabase

@@ -3,6 +3,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { Button } from '../../shared/components/Button';
 import { Key, Clock, FileText, AlertCircle, Play, QrCode, X, ShieldAlert } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
+import { api } from '../../lib/api';
 import { Card } from '../../shared/components/Card';
 import { Html5Qrcode } from 'html5-qrcode';
 import { useAuth } from '../../shared/context/AuthContext';
@@ -128,14 +129,12 @@ const JoinTest = () => {
         try {
             if (!user) throw new Error("Please login to continue");
 
-            const { data: quizDataList, error: quizError } = await supabase
-                .from('quizzes')
-                .select('*')
-                .eq('code', codeToVerify)
-                .limit(1);
-
-            if (quizError) throw quizError;
-            const quizData = quizDataList?.[0];
+            let quizData = null;
+            try {
+                quizData = await api.get(`/quizzes?code=${codeToVerify}`);
+            } catch (err) {
+                console.error("Failed to query quiz code via secure API:", err);
+            }
             if (!quizData) throw new Error('Quiz not found');
 
             const { count } = await supabase

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { Star, Clock, BookOpen, ArrowLeft, ArrowRight, Check, Plus, Loader2 } from 'lucide-react';
 import { supabase } from '../../../lib/supabase';
+import { api } from '../../../lib/api';
 import { useAuth } from '../../../shared/context/AuthContext';
 
 const QuizDetails = () => {
@@ -26,11 +27,12 @@ const QuizDetails = () => {
     useEffect(() => {
         const fetchQuiz = async () => {
             if (!id) return;
-            const { data: quizData } = await supabase
-                .from('quizzes')
-                .select('*')
-                .eq('id', id)
-                .single();
+            let quizData = null;
+            try {
+                quizData = await api.get(`/quizzes/${id}`);
+            } catch (err) {
+                console.error('Error fetching quiz via secure API:', err);
+            }
 
             if (quizData) {
                 const { count } = await supabase

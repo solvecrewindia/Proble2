@@ -5,6 +5,7 @@ import { useTheme } from '../../shared/context/ThemeContext';
 import { useAuth } from '../../shared/context/AuthContext';
 import { Moon, Sun, Loader2, X, ZoomIn, ChevronLeft, ChevronRight, CheckCircle2, AlertTriangle, ShieldAlert, Calculator as CalculatorIcon, Play, RotateCcw, Code2, WifiOff } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
+import { api } from '../../lib/api';
 import { useAntiCheat } from '../hooks/useAntiCheat';
 import { QuizTimer } from '../components/QuizTimer';
 import { Calculator } from '../../shared/components/Calculator';
@@ -32,6 +33,7 @@ const MCQTest = () => {
 
     const [loading, setLoading] = useState(true);
     const [testActive, setTestActive] = useState(false);
+    const [attemptId, setAttemptId] = useState<string | null>(null);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [isPaused, setIsPaused] = useState(false);
     const [zoomedImage, setZoomedImage] = useState<string | null>(null);
@@ -122,27 +124,40 @@ const MCQTest = () => {
     const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
     // Save Progress (Debounced)
+    // Save Progress (Debounced)
     const saveProgress = useCallback((currentAnswers: any) => {
         if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
 
         saveTimeoutRef.current = setTimeout(async () => {
             try {
-                const { data: { user } } = await supabase.auth.getUser();
                 if (!user || !id || id === 'combined' || !testActive) return;
 
-                console.log("Auto-saving draft...");
-                await supabase.from('attempts').upsert({
-                    quiz_id: id,
-                    student_id: user.id,
-                    answers: currentAnswers,
-                    status: 'in-progress',
-                    updated_at: new Date().toISOString()
-                }, { onConflict: 'student_id, quiz_id' });
+                // Retrieve active attempt ID from state or localStorage
+                const activeAttemptId = attemptId || localStorage.getItem(`attempt_id_${user.id}_${id}`);
+                if (!activeAttemptId) {
+                    console.warn("Cannot autosave answers: No active attempt ID found.");
+                    return;
+                }
+
+                console.log(`Auto-saving draft for attempt ${activeAttemptId}...`);
+                
+                // Map all answer values to standard strings for database safety
+                const answersMap: Record<string, string> = {};
+                Object.entries(currentAnswers).forEach(([qNum, val]) => {
+                    const question = questions.find(q => q.id === Number(qNum));
+                    if (question) {
+                        answersMap[question.dbId] = typeof val === 'object' ? JSON.stringify(val) : String(val);
+                    }
+                });
+
+                await api.put(`/attempts/${activeAttemptId}/autosave`, {
+                    answers: answersMap
+                });
             } catch (err) {
-                console.error("Failed to save draft:", err);
+                console.error("Failed to save draft via secure API:", err);
             }
         }, 2000);
-    }, [id, testActive]);
+    }, [id, testActive, attemptId, user, questions]);
 
     const calculateAndShowResults = useCallback(async () => {
         setIsSubmitting(true);
@@ -152,122 +167,44 @@ const MCQTest = () => {
         }
 
         try {
-            const { data: { user } } = await supabase.auth.getUser();
             if (!user || !id || id === 'combined') {
                 setShowResults(true);
                 return;
             }
 
-            // ZERO-TRUST SECURE GRADING
-            // 1. Prepare answers mapping (DB ID -> User Answer)
-            const answerPayload: Record<string, any> = {};
+            // ZERO-TRUST SECURE GRADING VIA MONOLITHIC BACKEND
+            const answerPayload: Record<string, string> = {};
             questions.forEach(q => {
-                if (answers[q.id] !== undefined) {
-                    answerPayload[q.dbId] = answers[q.id];
+                const userAnswer = answers[q.id];
+                if (userAnswer !== undefined && userAnswer !== null) {
+                    answerPayload[q.dbId] = typeof userAnswer === 'object' ? JSON.stringify(userAnswer) : String(userAnswer);
                 }
             });
 
-            // 2. Call Secure RPC
-            const { data: secureResult, error: rpcError } = await supabase.rpc('evaluate_quiz_answers', {
-                p_quiz_id: id,
-                p_student_answers: answerPayload
+            const activeAttemptId = attemptId || localStorage.getItem(`attempt_id_${user.id}_${id}`);
+            if (!activeAttemptId) {
+                throw new Error("No active exam attempt ID found for submission.");
+            }
+
+            console.log(`Submitting and grading attempt ${activeAttemptId} securely on server...`);
+            const submitData = await api.post(`/attempts/${activeAttemptId}/submit`, {
+                answers: answerPayload
             });
 
-            let calculatedScore = 0;
-
-            if (rpcError) {
-                console.error("RPC Grading failed, falling back to local (if data exists):", rpcError);
-                // Fallback local grading (only works if user is faculty/admin and actually received correct_answers)
-                questions.forEach((q) => {
-                    const userAnswer = answers[q.id];
-                    if (q.type === 'msq') {
-                        const correctArr = Array.isArray(q.correct) ? q.correct : [];
-                        const userArr = Array.isArray(userAnswer) ? userAnswer : [];
-                        if (userArr.length === correctArr.length &&
-                            userArr.every((val: any) => correctArr.includes(val))) {
-                            calculatedScore++;
-                        }
-                    } else if (q.type === 'range') {
-                        const userVal = Number(userAnswer);
-                        if (!isNaN(userVal) && q.correct && userVal >= q.correct.min && userVal <= q.correct.max) {
-                            calculatedScore++;
-                        }
-                    } else if (q.type === 'code') {
-                        if (codeExecutionStatus[q.id]) calculatedScore++;
-                    } else {
-                        if (userAnswer === q.correct) calculatedScore++;
-                    }
-                });
-            } else if (secureResult) {
-                calculatedScore = secureResult.score;
+            if (submitData && submitData.success) {
+                setScore(submitData.score);
             }
-
-            setScore(calculatedScore);
             setShowResults(true);
 
-            // --- SERVER-SIDE DUPLICATE CHECK (Zero-Trust) ---
-            // Even if the frontend somehow allowed a retake, verify at DB level.
-            const { data: existingResult } = await supabase
-                .from('quiz_results')
-                .select('id')
-                .eq('quiz_id', id)
-                .eq('student_id', user.id)
-                .limit(1);
-
-            if (existingResult && existingResult.length > 0) {
-                console.warn("Duplicate submission blocked — result already exists for this student + quiz.");
-                localStorage.removeItem(`quiz_progress_${user.id}_${id}`);
-                return; // Don't save again
-            }
-
-            // 3. Save to quiz_results (enforced by UNIQUE constraint on student_id, quiz_id)
-            // Using .upsert() so that even without the above check, the DB constraint
-            // will prevent a true duplicate row — it will update instead.
-            const { error: resultError } = await supabase.from('quiz_results').upsert({
-                quiz_id: id,
-                student_id: user.id,
-                score: calculatedScore,
-                total_questions: questions.length,
-                percentage: (calculatedScore / questions.length) * 100
-            }, { onConflict: 'student_id, quiz_id', ignoreDuplicates: true });
-
-            if (resultError) {
-                console.error("Failed to save quiz result:", resultError);
-            }
-
-            // 4. Mark Attempt as Completed
-            await supabase.from('attempts').update({
-                status: 'completed',
-                score: calculatedScore,
-                completed_at: new Date().toISOString(),
-                answers: answers // Final save
-            }).eq('quiz_id', id).eq('student_id', user.id);
-
-            // Clear Local Storage on Successful Submit
+            // Clear progress local storage
             localStorage.removeItem(`quiz_progress_${user.id}_${id}`);
+            localStorage.removeItem(`attempt_id_${user.id}_${id}`);
 
         } catch (err: any) {
-            console.error("Error saving results:", err);
-            
-            // --- AUTO-SESSION REFRESH ON JWT EXPIRE ---
-            const isAuthError = err.message?.toLowerCase().includes('jwt') || err.message?.toLowerCase().includes('unauthorized');
-            if (isAuthError) {
-                console.warn("MCQTest: Detected expired session during submit. Attempting refresh...");
-                try {
-                    const { data: { session } } = await supabase.auth.getSession();
-                    if (session) {
-                        console.log("MCQTest: Session refreshed. Retrying submission...");
-                        calculateAndShowResults();
-                        return;
-                    }
-                } catch (refreshErr) {
-                    console.error("MCQTest: Failed to refresh session automatically", refreshErr);
-                }
-            }
-
+            console.error("Error saving results via secure API:", err);
             setShowResults(true);
         }
-    }, [answers, questions, id, codeExecutionStatus]);
+    }, [answers, questions, id, attemptId, user]);
 
     // Security Focus State (For UI overlays only)
     useEffect(() => {
@@ -296,6 +233,27 @@ const MCQTest = () => {
         enabled: testActive && !showResults,
         level: quizSettings?.antiCheatLevel || (quizSettings?.isMaster ? 'strict' : 'standard'), // Master tests default to strict
         maxViolations: quizSettings?.maxViolations || 3,
+        onViolation: async (count, type) => {
+            console.warn(`Anti-cheat violation detected: ${type} (Strike ${count})`);
+            try {
+                const activeAttemptId = attemptId || localStorage.getItem(`attempt_id_${user.id}_${id}`);
+                if (activeAttemptId) {
+                    // Map human-readable violation descriptions to standard technical flags
+                    let flag = 'unknown_violation';
+                    const lowerType = type.toLowerCase();
+                    if (lowerType.includes('full screen')) flag = 'fullscreen_exit';
+                    else if (lowerType.includes('tab') || lowerType.includes('hidden') || lowerType.includes('focus')) flag = 'tab_switch';
+                    else if (lowerType.includes('keyboard') || lowerType.includes('shortcut')) flag = 'restricted_key';
+                    else if (lowerType.includes('multi-touch')) flag = 'multi_touch';
+
+                    await api.post(`/attempts/${activeAttemptId}/telemetry`, {
+                        flags: [flag]
+                    });
+                }
+            } catch (err) {
+                console.error("Failed to log telemetry violation via secure API:", err);
+            }
+        },
         onAutoSubmit: () => {
             // No alert here, overlay handles the visual feedback
             calculateAndShowResults();
@@ -355,7 +313,7 @@ const MCQTest = () => {
                             // Load Draft / In-Progress Attempt
                             const { data: draftAttempt } = await supabase
                                 .from('attempts')
-                                .select('answers, status')
+                                .select('id, answers, status')
                                 .eq('quiz_id', quizData.id)
                                 .eq('student_id', user.id)
                                 .eq('status', 'in-progress')
@@ -363,22 +321,30 @@ const MCQTest = () => {
                                 .limit(1)
                                 .single();
 
-                            if (draftAttempt && draftAttempt.answers) {
-                                console.log("Restoring Data:", draftAttempt.answers);
-                                setAnswers(draftAttempt.answers);
-                                // Optional: Restore other state if saved
+                            if (draftAttempt) {
+                                if (draftAttempt.id) {
+                                    setAttemptId(draftAttempt.id);
+                                    localStorage.setItem(`attempt_id_${user.id}_${quizData.id}`, draftAttempt.id);
+                                }
+                                if (draftAttempt.answers) {
+                                    console.log("Restoring Data:", draftAttempt.answers);
+                                    setAnswers(draftAttempt.answers);
+                                    // Optional: Restore other state if saved
+                                }
                             }
                         }
                     }
                 }
 
-                const { data, error } = await supabase
-                    .from('questions')
-                    .select('*')
-                    .in('quiz_id', targetQuizIds)
-                    .order('id');
-
-                if (error) throw error;
+                let data: any[] = [];
+                for (const quizId of targetQuizIds) {
+                    try {
+                        const secureQuestions = await api.get(`/quizzes/${quizId}/questions`);
+                        data = [...data, ...(secureQuestions || [])];
+                    } catch (err) {
+                        console.error(`Failed to fetch secure questions for quiz ${quizId}:`, err);
+                    }
+                }
 
                 if (data && data.length > 0) {
                     const mapped = data.map((q: any, index: number) => {
@@ -618,6 +584,34 @@ const MCQTest = () => {
 
         return () => clearInterval(interval);
     }, [testActive, showResults, quizSettings, calculateAndShowResults]);
+
+    const handleStartExam = async () => {
+        await enterFullScreen();
+        setTestActive(true);
+        
+        if (user && id && id !== 'combined') {
+            try {
+                let activeAttemptId = attemptId || localStorage.getItem(`attempt_id_${user.id}_${id}`);
+                if (!activeAttemptId) {
+                    console.log("Initializing secure exam attempt on server...");
+                    const response = await api.post('/attempts/start', {
+                        quizId: id,
+                        studentId: user.id
+                    });
+                    if (response?.attemptId) {
+                        activeAttemptId = response.attemptId;
+                        setAttemptId(activeAttemptId);
+                        localStorage.setItem(`attempt_id_${user.id}_${id}`, activeAttemptId);
+                    }
+                } else {
+                    setAttemptId(activeAttemptId);
+                    console.log(`Re-attaching to existing attempt ${activeAttemptId}...`);
+                }
+            } catch (err) {
+                console.error("Failed to initialize secure exam session:", err);
+            }
+        }
+    };
 
     if (loading) return <div className="h-screen flex items-center justify-center bg-background"><Loader2 className="animate-spin w-8 h-8 text-primary" /></div>;
 
@@ -869,7 +863,7 @@ const MCQTest = () => {
                             Switching tabs or exiting full screen will result in strict penalties.
                         </p>
                         <button
-                            onClick={async () => { await enterFullScreen(); setTestActive(true); }}
+                            onClick={handleStartExam}
                             className="bg-red-600 hover:bg-red-700 text-white font-bold py-4 px-10 rounded-xl transition-all hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-red-600/30"
                         >
                             {!testActive ? "I Understand, Start Exam" : "Resume Full Screen"}
