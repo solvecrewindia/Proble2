@@ -156,7 +156,7 @@ const Settings = () => {
                         <div className="relative">
                             <input
                                 type={showApiKey ? "text" : "password"}
-                                value="sk_live_51MzQx2Kj8L9p0O1n2M3k4J5i6H7g8F9"
+                                value="admin_api_key_placeholder_xyz"
                                 readOnly
                                 className="h-10 w-full rounded-xl border border-surface bg-background px-4 text-sm text-muted focus:border-primary focus:outline-none"
                             />
