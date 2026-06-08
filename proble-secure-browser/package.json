@@ -1,0 +1,14 @@
+{
+  "name": "proble-secure-browser",
+  "version": "1.0.0",
+  "description": "Custom PC Lockdown Browser for PROBLE",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "author": "Sundar",
+  "license": "ISC",
+  "devDependencies": {
+    "electron": "^42.2.0"
+  }
+}
